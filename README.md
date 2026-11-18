@@ -22,7 +22,9 @@ weights contain no audio and may be shared (Basis licence §3).
 
 You need:
 - Linux with one NVIDIA GPU (built for an H200);
-- about 100 GB of free disk;
+- an NVIDIA driver ≥ 580: the locked torch 2.15.0 is built for CUDA 13 (13.2 runtime); `nvidia-smi` shows the
+  driver version;
+- about 150 GB of free disk;
 - outbound access to `github.com` and `huggingface.co`.
 
 ```bash
@@ -46,7 +48,7 @@ uv run python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_
 ```
 
 What good output looks like:
-- `pytest` ends with `33 passed`. A silero `FutureWarning` and pyannote `'uem' was approximated` warnings are
+- `pytest` ends with `36 passed`. A silero `FutureWarning` and pyannote `'uem' was approximated` warnings are
   normal.
 - The second command prints `True NVIDIA H200 ...`.
 
@@ -67,6 +69,28 @@ Run a smoke first. It downloads 3 Hindi segments:
 ```bash
 uv run diar-prepare --langs hi --limit-segments 3 --out-dir data/smoke
 ```
+
+Before the full run, check that the labels line up with the real audio. Listen to one `data/smoke/wav/*.wav`
+next to its `data/smoke/rttm/*.rttm`, or run this check:
+
+```bash
+uv run python - <<'EOF'
+import json, numpy as np, soundfile as sf
+from nemo_3_diarization.labels import merge, read_rttm
+rms = lambda z: np.sqrt(np.mean(z ** 2)) + 1e-12
+for line in open("data/smoke/train.json"):
+    r = json.loads(line)
+    y, sr = sf.read(r["audio_filepath"])
+    inside = np.zeros(len(y), bool)
+    for s, e in merge([iv for v in read_rttm(r["rttm_filepath"]).values() for iv in v]):
+        inside[int(s * sr):int(e * sr)] = True
+    print(f"{20 * np.log10(rms(y[inside]) / rms(y[~inside])):5.1f} dB  {r['audio_filepath']}")
+EOF
+```
+
+It prints, per smoke mix, how much louder the audio is inside the RTTM speech than outside it. Every line should
+be ≥ 10 dB. Lower values mean the labels are shifted or scaled against the audio: stop and investigate before the
+full run. `nan` means the window has no non-speech; judge by the other lines.
 
 Then the full run:
 
@@ -163,8 +187,10 @@ What good smoke output looks like:
 - the two files in `out/smoke/`;
 - the `restore_from` command exits without error.
 
-Keep `--max-steps` ≥ `--val-every`. With fewer steps, no validation runs, so no checkpoint is saved. The script
-then fails after training, and the trained weights are lost.
+Keep `--max-steps` ≥ `--val-every`. With fewer steps no validation runs, so there is no best checkpoint: the script
+prints `best checkpoint: NONE - exporting last weights` and exports the last weights. If training crashes or you
+press Ctrl-C, the script still writes both output files, from the best checkpoint so far or else the last weights,
+before it exits with the error.
 
 Then the full run:
 
@@ -203,14 +229,38 @@ Outputs:
 
 ### 5. Evaluate stock vs fine-tuned
 
+Score only the merged model, with the same `--manifests` as step 3:
+
 ```bash
-uv run diar-evaluate --models nvidia/Nemotron-3-Diarization out/nemotron3-diar-lora-merged.nemo \
+uv run diar-evaluate --models out/nemotron3-diar-lora-merged.nemo \
   --manifests data/basis/test.json data/basis/test_all.json data/prod/test.json \
-  --out out/results.json
+  --out out/finetuned.json
 ```
 
-This scores stock again, so both models end up in one table and one file. Put the printed table, or the rows
-from `out/results.json`, in the PR description.
+Then compare it with the step-3 baseline and apply the ship rule below:
+
+```bash
+uv run python - <<'EOF'
+import json
+load = lambda p: {(r["latency"], r["manifest"]): r["der"] for r in json.load(open(p))}
+stock, ft = load("out/baseline.json"), load("out/finetuned.json")
+assert stock.keys() == ft.keys(), "both runs must finish on the same --manifests"
+ship = True
+for (lat, m), s in sorted(stock.items()):
+    ok = ft[lat, m] <= s  # a NaN DER never passes
+    ship &= ok or lat != "1.04s"
+    print(f"{lat:<6} {m:<28} stock {s:.4f}  merged {ft[lat, m]:.4f}  {'PASS' if ok else 'FAIL'}"
+          + ("" if lat == "1.04s" else "  (not gated)"))
+print("SHIP" if ship else "DO NOT SHIP: keep the stock model")
+EOF
+```
+
+It prints one line per latency and manifest and ends with `SHIP` only if the merged DER at 1.04 s is no worse
+than stock's on every manifest. The 0.32 s lines are for information. Put both printed tables and this output in
+the PR description.
+
+`diar-evaluate` writes its JSON after every scored row, so a crashed run keeps what it finished; the `assert`
+above stops on such a partial file. A DER of `nan` means that manifest's references hold no speech.
 
 ## Ship rule
 
@@ -225,3 +275,4 @@ manifest: Basis 2-speaker, Basis all-speaker, and production when present. Other
 | Gated-repo, 401 or 403 error from `diar-prepare` | The logged-in HF account has no Basis access. Request access, then run `uv run hf auth login` again. |
 | `ModuleNotFoundError: No module named 'nemo'` | Run `uv sync --extra train`. A plain `uv sync` removes NeMo. |
 | CUDA out of memory in `diar-train` | Lower `--batch-size`. |
+| `torch.cuda.is_available()` prints `False` | Run `nvidia-smi`. If it fails or shows a driver below 580, install driver ≥ 580 (the locked torch needs CUDA 13) and reboot. |
