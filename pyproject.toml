@@ -6,11 +6,14 @@ readme = "README.md"
 authors = [
     { name = "uday-kapture", email = "uday.sharma@kapturecrm.com" }
 ]
-requires-python = ">=3.13"
-dependencies = []
+requires-python = ">=3.12,<3.13"
+dependencies = ["numpy", "scipy", "soundfile", "silero-vad", "huggingface_hub", "peft", "torch", "pyannote.metrics"]
 
-[project.scripts]
-nemo-3-diarization = "nemo_3_diarization:main"
+[project.optional-dependencies]
+train = ["nemo-toolkit[asr]>=3.0.0"]
+
+[dependency-groups]
+dev = ["pytest"]
 
 [build-system]
 requires = ["uv_build>=0.13.6,<0.14.0"]
