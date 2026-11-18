@@ -1,5 +1,6 @@
 import numpy as np
 import soundfile as sf
+from conftest import fake_vad
 
 from nemo_3_diarization.labels import merge, read_rttm, split_of
 from nemo_3_diarization import prepare
@@ -10,13 +11,6 @@ SR, DUR = 48000, 23
 
 def find_conv(split):
     return next(f"c{i}" for i in range(1000) if split_of(f"c{i}") == split)
-
-
-def fake_vad(x, sr):
-    f = int(0.05 * sr)
-    n = len(x) // f
-    loud = np.sqrt((x[: n * f].reshape(n, f) ** 2).mean(1)) > 0.01
-    return merge([(i * 0.05, (i + 1) * 0.05) for i in np.flatnonzero(loud)])
 
 
 def make_segment(root, conversation_id, silence=(), bursts=None, muted=True):

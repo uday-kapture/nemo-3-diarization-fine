@@ -17,6 +17,7 @@ dev = ["pytest"]
 
 [project.scripts]
 diar-prepare = "nemo_3_diarization.prepare:main"
+diar-prod-testset = "nemo_3_diarization.prod_testset:main"
 
 [build-system]
 requires = ["uv_build>=0.13.6,<0.14.0"]
