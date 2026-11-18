@@ -10,7 +10,8 @@ requires-python = ">=3.12,<3.13"
 dependencies = ["numpy", "scipy", "soundfile", "silero-vad", "huggingface_hub", "peft", "torch", "pyannote.metrics"]
 
 [project.optional-dependencies]
-train = ["nemo-toolkit[asr]>=3.0.0"]
+# PyPI 3.0.0 cannot build this checkpoint's encoder (self_attention_model: rope); main can.
+train = ["nemo-toolkit[asr] @ git+https://github.com/NVIDIA-NeMo/Speech@f47ddde246380a250bd868b51b4a7f3a2f3770f3"]
 
 [dependency-groups]
 dev = ["pytest"]
@@ -18,7 +19,12 @@ dev = ["pytest"]
 [project.scripts]
 diar-prepare = "nemo_3_diarization.prepare:main"
 diar-prod-testset = "nemo_3_diarization.prod_testset:main"
+diar-train = "nemo_3_diarization.train:main"
 
 [build-system]
 requires = ["uv_build>=0.13.6,<0.14.0"]
 build-backend = "uv_build"
+
+[tool.uv]
+# NeMo's git pyproject routes torch to a CPU-only index off Linux/macOS, which conflicts in a universal lock.
+environments = ["sys_platform == 'darwin'", "sys_platform == 'linux'"]
