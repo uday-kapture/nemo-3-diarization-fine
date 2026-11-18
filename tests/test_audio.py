@@ -32,3 +32,12 @@ def test_mix_silent_track_no_nan():
 
 def test_vad_silence_is_empty():
     assert vad(np.zeros(8000 * 5, dtype=np.float32), 8000) == []
+
+def test_vad_times_are_sample_exact_with_block_offsets(monkeypatch):
+    from nemo_3_diarization import audio
+    monkeypatch.setattr(audio, "_BLOCK", 16000 * 2)
+    monkeypatch.setattr(audio, "_model", lambda: None)
+    monkeypatch.setattr(audio, "get_speech_timestamps", lambda *a, **k: [{"start": 1601, "end": 8003}])
+    got = audio.vad(np.zeros(8000 * 5, dtype=np.float32), 8000)  # 5 s -> 3 blocks, offsets 0/2/4 s
+    want = [(o + 1601 / 16000, o + 8003 / 16000) for o in (0.0, 2.0, 4.0)]
+    assert np.allclose(got, want, atol=1e-9)

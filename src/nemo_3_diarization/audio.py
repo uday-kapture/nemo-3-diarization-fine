@@ -3,12 +3,15 @@ from functools import cache
 from math import log
 
 import numpy as np
+import torch
 from scipy.signal import butter, resample_poly, sosfiltfilt
+from silero_vad import get_speech_timestamps, load_silero_vad
 
 from nemo_3_diarization.labels import Intervals, merge
 
 _A = 87.6
 _K = 1 + log(_A)
+_BLOCK = 600 * 16000  # VAD block, samples at 16 kHz
 
 
 def alaw_roundtrip(x: np.ndarray) -> np.ndarray:
@@ -38,17 +41,13 @@ def mix(tracks: list[np.ndarray], speech: list[Intervals], sr: int = 8000) -> np
 
 @cache
 def _model():
-    from silero_vad import load_silero_vad
     return load_silero_vad()
 
 
 def vad(x: np.ndarray, sr: int) -> Intervals:
-    import torch
-    from silero_vad import get_speech_timestamps
     y = resample_poly(x, 16000, sr).astype(np.float32)
-    block = 600 * 16000
     iv: Intervals = []
-    for i in range(0, len(y), block):
-        ts = get_speech_timestamps(torch.from_numpy(y[i:i + block]), _model(), sampling_rate=16000, return_seconds=True)
-        iv += [(i / 16000 + t["start"], i / 16000 + t["end"]) for t in ts]
+    for i in range(0, len(y), _BLOCK):
+        ts = get_speech_timestamps(torch.from_numpy(y[i:i + _BLOCK]), _model(), sampling_rate=16000)
+        iv += [((i + t["start"]) / 16000, (i + t["end"]) / 16000) for t in ts]
     return merge(iv)
