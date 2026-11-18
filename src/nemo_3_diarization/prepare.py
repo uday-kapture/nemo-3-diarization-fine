@@ -15,13 +15,14 @@ from nemo_3_diarization.labels import (
 )
 
 SR = 48000
+BLOCK = 600 * SR  # VAD block, samples at 48 kHz; bounds memory on hour-long tracks
 REPO = "basis-ai/basis-conversations-1500"
 
 
 def _vad_track(path: Path, vad_fn) -> Intervals:
     iv: Intervals = []
     off = 0
-    for block in sf.blocks(path, blocksize=600 * SR, dtype="float32"):  # bounds memory on hour-long tracks
+    for block in sf.blocks(path, blocksize=BLOCK, dtype="float32"):
         iv += [(s + off / SR, e + off / SR) for s, e in vad_fn(block, SR)]
         off += len(block)
     return merge(iv)
@@ -47,12 +48,13 @@ def process_segment(seg: dict, root: Path, out: Path, vad_fn=vad, win: float = 1
     manifest: list[dict] = []
     for start, end in windows(seg["duration"], muted, win):
         phone: dict[str, object] = {}
-        picks = [("pair", top_speakers(activity, start, end, 2, 5.0))]
-        if split == "test":
+        pair = top_speakers(activity, start, end, 2, 5.0)
+        if len(pair) != 2:
+            continue
+        picks = [("pair", pair)]
+        if split == "test":  # the all-speakers mix only accompanies a window that produced a pair row
             picks.append(("all", top_speakers(activity, start, end, 8, 0.5)))
         for kind, spks in picks:
-            if len(spks) < 2:  # pair is capped at 2 by top_speakers
-                continue
             for spk in spks:
                 if spk not in phone:
                     x, _ = sf.read(paths[spk], start=int(start * SR), stop=int(end * SR), dtype="float32")
@@ -75,7 +77,10 @@ def _init():
 
 
 def _work(args):
-    return process_segment(*args)
+    try:
+        return args[0]["segment_id"], process_segment(*args), None
+    except Exception as e:  # one bad segment must not lose the rest of the run
+        return args[0]["segment_id"], [], repr(e)  # repr keeps it on one line
 
 
 def main():
@@ -105,9 +110,13 @@ def main():
                       allow_patterns=[p for s in segs for p in s["tracks"].values()])
 
     rows: list[dict] = []
+    failed = 0
     with mp.get_context("spawn").Pool(a.workers, initializer=_init) as pool:
-        for r in pool.imap_unordered(_work, [(s, raw, out) for s in segs]):
+        for sid, r, err in pool.imap_unordered(_work, [(s, raw, out) for s in segs]):
             rows += r
+            if err:
+                failed += 1
+                print(f"FAILED {sid}: {err}")
     out.mkdir(parents=True, exist_ok=True)
     for name, pick in [(sp, lambda r, sp=sp: r["split"] == sp and r["kind"] == "pair") for sp in ("train", "val", "test")] + [
         ("test_all", lambda r: r["kind"] == "all")
@@ -115,6 +124,7 @@ def main():
         (out / f"{name}.json").write_text("".join(json.dumps(r) + "\n" for r in rows if pick(r)))
     for (split, kind), n in sorted(Counter((r["split"], r["kind"]) for r in rows).items()):
         print(f"{split:5s} {kind:4s} {n}")
+    print(f"failed segments: {failed}")
 
 
 if __name__ == "__main__":
