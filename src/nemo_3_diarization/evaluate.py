@@ -42,12 +42,15 @@ def main():
     ap.add_argument("--manifests", nargs="+", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
     a = ap.parse_args()
+    manifests = {m: [json.loads(line) for line in m.read_text().splitlines() if line.strip()] for m in a.manifests}
+    if empty := [str(m) for m, rows in manifests.items() if not rows]:
+        ap.error(f"empty manifest(s): {', '.join(empty)}")  # diarize([]) would raise after minutes of model loading
 
     import torch
     from nemo.collections.asr.models import SortformerEncLabelModel
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    manifests = {m: [json.loads(line) for line in m.read_text().splitlines() if line.strip()] for m in a.manifests}
+    a.out.parent.mkdir(parents=True, exist_ok=True)
     results = []
     for name in a.models:
         load = SortformerEncLabelModel.restore_from if name.endswith(".nemo") else SortformerEncLabelModel.from_pretrained
@@ -67,20 +70,19 @@ def main():
                     for k in sums:
                         sums[k] += s[k]
                     spk_ok += len(hyp) == r["num_speakers"]
-                t = sums["total"]
+                t = sums["total"] or float("nan")  # all-silent references: DER is undefined, so NaN
                 results.append({
-                    "model": name, "latency": lat, "manifest": str(m), "files": len(rows), "total_sec": t,
+                    "model": name, "latency": lat, "manifest": str(m), "files": len(rows), "total_sec": sums["total"],
                     "der": (sums["miss"] + sums["fa"] + sums["conf"]) / t,
                     "miss": sums["miss"] / t, "fa": sums["fa"] / t, "conf": sums["conf"] / t,
                     "spk_count_acc": spk_ok / len(rows),
                 })
+                a.out.write_text(json.dumps(results, indent=2))  # after every row, so a crash keeps what was scored
 
     print(f"\n{'model':<45} {'latency':<7} {'manifest':<30} {'DER':>7} {'miss':>7} {'FA':>7} {'conf':>7} {'spk acc':>7}")
     for r in results:
         print(f"{r['model'][-45:]:<45} {r['latency']:<7} {'/'.join(Path(r['manifest']).parts[-2:])[-30:]:<30} "
               f"{r['der']:7.4f} {r['miss']:7.4f} {r['fa']:7.4f} {r['conf']:7.4f} {r['spk_count_acc']:7.4f}")
-    a.out.parent.mkdir(parents=True, exist_ok=True)
-    a.out.write_text(json.dumps(results, indent=2))
 
 
 if __name__ == "__main__":
