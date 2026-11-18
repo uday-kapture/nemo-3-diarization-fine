@@ -70,5 +70,5 @@ def read_rttm(path: str | Path) -> dict[str, Intervals]:
 
 def split_of(conversation_id: str) -> str:
     # shortcut: speaker overlap across splits, switch to speaker-disjoint if val/test scores look inflated
-    h = int(hashlib.sha256(conversation_id.encode()).hexdigest(), 16) % 100
+    h = int(hashlib.sha1(conversation_id.encode(), usedforsecurity=False).hexdigest(), 16) % 100
     return "train" if h < 90 else "val" if h < 95 else "test"
