@@ -41,7 +41,7 @@ def main():
 
     model = SortformerEncLabelModel.from_pretrained("nvidia/Nemotron-3-Diarization")
     model.set_trainer(trainer)
-    model.requires_grad_(False)
+    model.requires_grad_(False)  # not model.freeze(): NeMo's freeze() also calls eval(), disabling dropout/augmentation
     targets = add_lora(model.encoder, a.rank, a.alpha)
     print(f"LoRA targets ({len(targets)}):\n  " + "\n  ".join(targets))
 
@@ -61,13 +61,17 @@ def main():
     total = sum(p.numel() for p in model.parameters())
     print(f"trainable params: {trainable:,} / {total:,} ({100 * trainable / total:.2f} %)")
 
-    trainer.fit(model)
-
-    print(f"best checkpoint: {ckpt.best_model_path} (val_loss {ckpt.best_model_score})")
-    model.load_state_dict(torch.load(ckpt.best_model_path, map_location="cpu", weights_only=False)["state_dict"])
-    torch.save(lora_state_dict(model.encoder), out / "lora_adapter.pt")
-    merge_lora(model.encoder)
-    model.save_to(str(out / "nemotron3-diar-lora-merged.nemo"))
+    # finally: export even on a crash or Ctrl-C (Lightning turns KeyboardInterrupt into sys.exit(1)) or with no validation
+    try:
+        trainer.fit(model)
+    finally:
+        print(f"best checkpoint: {ckpt.best_model_path or 'NONE - exporting last weights'} (val_loss {ckpt.best_model_score})")
+        if ckpt.best_model_path:
+            model.load_state_dict(torch.load(ckpt.best_model_path, map_location="cpu", weights_only=False)["state_dict"])
+        out.mkdir(parents=True, exist_ok=True)  # a crash before Lightning's first write leaves no out dir
+        torch.save(lora_state_dict(model.encoder), out / "lora_adapter.pt")
+        merge_lora(model.encoder)
+        model.save_to(str(out / "nemotron3-diar-lora-merged.nemo"))
 
 
 if __name__ == "__main__":
