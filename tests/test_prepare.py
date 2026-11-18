@@ -96,3 +96,10 @@ def test_vad_track_adds_block_offsets(tmp_path, monkeypatch):
 def test_work_reports_failure_instead_of_raising(tmp_path):
     sid, rows, err = _work(({"segment_id": "bad"}, tmp_path, tmp_path / "out"))
     assert sid == "bad" and rows == [] and "KeyError" in err
+
+
+def test_non_48k_track_fails_segment(tmp_path):
+    seg = make_segment(tmp_path, conversation_id=find_conv("train"))
+    sf.write(tmp_path / seg["tracks"]["a"], np.zeros(DUR * 16000, dtype=np.float32), 16000)
+    sid, rows, err = _work((seg, tmp_path, tmp_path / "out", fake_vad, 10.0))
+    assert sid == "s1" and rows == [] and "expected 48000 Hz" in err

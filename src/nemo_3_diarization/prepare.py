@@ -32,6 +32,9 @@ def process_segment(seg: dict, root: Path, out: Path, vad_fn=vad, win: float = 1
     root, out = Path(root).resolve(), Path(out).resolve()
     sid, split = seg["segment_id"], split_of(seg["conversation_id"])
     paths = {spk: root / p for spk, p in seg["tracks"].items()}
+    for p in paths.values():  # another rate would silently time-scale every label taken from this track
+        if sf.info(p).samplerate != SR:
+            raise ValueError(f"{p.name}: expected {SR} Hz")
     rows: dict[str, Intervals] = {}
     for t in seg["transcript"]:
         rows.setdefault(t["speaker"], []).append((t["start"], t["end"]))

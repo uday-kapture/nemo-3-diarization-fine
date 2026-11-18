@@ -52,6 +52,11 @@ def test_non_8k_rejected(tmp_path):
         process_recording(make_stereo(tmp_path / "c.wav", sr=16000), tmp_path / "out", vad_fn=fake_vad)
 
 
+def test_whitespace_in_file_id_rejected(tmp_path):
+    with pytest.raises(ValueError, match="whitespace in file id"):
+        process_recording(make_stereo(tmp_path / "call 1.wav"), tmp_path / "out", vad_fn=fake_vad)
+
+
 def test_clipping_mix_scaled_to_099(tmp_path):
     row = process_recording(make_stereo(tmp_path / "c.wav", ch1=((0, 2),), amp=0.9), tmp_path / "out", vad_fn=fake_vad)
     assert abs(np.abs(sf.read(row["audio_filepath"])[0]).max() - 0.99) < 1e-3

@@ -12,6 +12,8 @@ from nemo_3_diarization.labels import rttm_lines
 
 def process_recording(path: Path, out: Path, vad_fn=vad) -> dict:
     path, out = Path(path).resolve(), Path(out).resolve()
+    if any(c.isspace() for c in path.stem):  # RTTM fields are whitespace-separated
+        raise ValueError("whitespace in file id")
     x, sr = sf.read(path, dtype="float32", always_2d=True)
     if x.shape[1] != 2:
         raise ValueError("expected 2 channels")
