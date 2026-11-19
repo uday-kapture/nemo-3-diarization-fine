@@ -43,6 +43,7 @@ def main():
     ap.add_argument("--manifests", nargs="+", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--mlflow-experiment", default="Nemotron-diarization-fine-tune")
+    ap.add_argument("--batch-size", type=int, default=32, help="files streamed together; 1 leaves the GPU idle")
     a = ap.parse_args()
     try:
         tracking.tracking_uri()
@@ -62,7 +63,7 @@ def main():
         id_file = Path(name).parent / tracking.RUN_ID_FILE
         parent = id_file.read_text().strip() if name.endswith(".nemo") and id_file.exists() else None
         with tracking.run(a.mlflow_experiment, name, stage="evaluate", parent_run_id=parent):
-            _evaluate(name, manifests, device, results, a.out)
+            _evaluate(name, manifests, device, results, a.out, a.batch_size)
 
     print(f"\n{'model':<45} {'latency':<7} {'manifest':<30} {'DER':>7} {'miss':>7} {'FA':>7} {'conf':>7} {'spk acc':>7}")
     for r in results:
@@ -74,11 +75,11 @@ def _short(manifest: str) -> str:
     return "/".join(Path(manifest).parts[-2:])  # data/basis/test.json -> basis/test.json
 
 
-def _evaluate(name: str, manifests: dict, device, results: list[dict], out: Path) -> None:
+def _evaluate(name: str, manifests: dict, device, results: list[dict], out: Path, batch_size: int) -> None:
     import mlflow
     from nemo.collections.asr.models import SortformerEncLabelModel
 
-    mlflow.log_params({"model": name, "manifests": " ".join(map(str, manifests))[:6000]})
+    mlflow.log_params({"model": name, "manifests": " ".join(map(str, manifests))[:6000], "batch_size": batch_size})
     load = SortformerEncLabelModel.restore_from if name.endswith(".nemo") else SortformerEncLabelModel.from_pretrained
     model = load(name, map_location=device).float().eval()
     for lat, values in LATENCIES.items():
@@ -87,7 +88,7 @@ def _evaluate(name: str, manifests: dict, device, results: list[dict], out: Path
         model._check_streaming_parameters()
         for m, rows in manifests.items():
             # 8 kHz WAVs are resampled to the preprocessor's 16 kHz by NeMo's loader (AudioSegment target_sr).
-            hyps = model.diarize(audio=[r["audio_filepath"] for r in rows], batch_size=1)
+            hyps = model.diarize(audio=[r["audio_filepath"] for r in rows], batch_size=batch_size)
             sums = {"total": 0.0, "miss": 0.0, "fa": 0.0, "conf": 0.0}
             spk_ok = 0
             for r, lines in zip(rows, hyps, strict=True):
