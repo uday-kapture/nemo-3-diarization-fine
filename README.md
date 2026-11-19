@@ -49,7 +49,7 @@ uv run python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_
 ```
 
 What good output looks like:
-- `pytest` ends with `47 passed`. A silero `FutureWarning` and pyannote `'uem' was approximated` warnings are
+- `pytest` ends with `49 passed`. A silero `FutureWarning` and pyannote `'uem' was approximated` warnings are
   normal.
 - The second command prints `True NVIDIA H200 ...`.
 
@@ -119,6 +119,19 @@ about 8 GB of raw audio is on disk at once with 16 workers, usually about 2 GB. 
 |---|---|
 | `train.json`, `val.json`, `test.json` | 105 s mixes of the 2 most active speakers, split about 90/5/5 by conversation |
 | `test_all.json` | the same test windows with every active speaker mixed in; catches a model that learned to stop at 2 speakers |
+
+While it runs it prints:
+- `done <segment>: <n> mixes in <time> · <k>/523 segments, <p>% of the audio · ... · ETA <time>` as each segment
+  finishes. The percentage and ETA count hours of speaker tracks, not segments, because segments range from minutes
+  to 76 h of tracks.
+- `still working: <n> segments left, last one finished <time> ago; running: <segments>` after every 5 minutes in
+  which no segment finished. The biggest segments keep one worker busy for 30-60 minutes, so the last stretch of the
+  run can show only these lines. That is normal while they keep coming.
+- `prepare stopped: BrokenProcessPool. A worker died, ...` if a worker was killed, usually for memory. Rerun with
+  fewer `--workers`.
+
+With `GCHAT_WEBHOOK_URL` set, it also posts to Chat, in a thread named `prepare-<out-dir>-<date>-<time>`: the start,
+every 10 % of the audio, the first failed segment, and the finish or the stop.
 
 The run ends with one count line per split and a failure count:
 
@@ -307,6 +320,8 @@ Both work as in the sibling `nemotron-3.5-asr` repo, with the same environment v
 - In a Chat space, add an incoming webhook (Apps & integrations → Webhooks) and export its URL as
   `GCHAT_WEBHOOK_URL`. Anyone holding the URL can post into the space, so keep it in `.env`, out of git. Without it
   nothing is sent.
+- `diar-prepare` posts its start, every 10 % of the audio, the first failed segment, and the finish or a stop,
+  into a thread named `prepare-<out-dir>-<date>-<time>`.
 - Each training run posts into its own thread, named after `--name`:
   - start: steps, batch size, LoRA parameter count, GPU;
   - every validation: `val_loss` against the best so far, train loss, ETA;
@@ -315,6 +330,13 @@ Both work as in the sibling `nemotron-3.5-asr` repo, with the same environment v
   - the finish, with the best `val_loss` and the merged model's path.
 - A run killed outright (`kill -9`, the host's out-of-memory killer, a lost VM) sends nothing. Messages stopping is
   the sign.
+- The variable must be set in the shell that runs the command (`source .env` in every new shell or tmux window).
+  To check the webhook, run this. It prints `True` and a message appears in the space; otherwise it prints `False`
+  and the reason:
+
+  ```bash
+  uv run python -c "from nemo_3_diarization.notify import GChat; print(GChat.from_env('webhook-test').send('hello from the VM'))"
+  ```
 - Messages carry metrics and step counts, never audio or labels. A failed post is printed to stderr and training
   continues.
 

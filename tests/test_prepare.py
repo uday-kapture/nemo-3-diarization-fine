@@ -1,13 +1,17 @@
+import os
 import shutil
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 
 import numpy as np
+import pytest
 import soundfile as sf
 from conftest import fake_vad
 
 from nemo_3_diarization.labels import merge, read_rttm, split_of
 from nemo_3_diarization import prepare
-from nemo_3_diarization.prepare import _vad_track, _work, process_segment
+from nemo_3_diarization.notify import GChat
+from nemo_3_diarization.prepare import _run, _vad_track, _work, process_segment, progress_line
 
 SR, DUR = 48000, 23
 
@@ -97,7 +101,7 @@ def test_vad_track_adds_block_offsets(tmp_path, monkeypatch):
 
 
 def test_work_reports_failure_instead_of_raising(tmp_path):
-    sid, rows, err = _work(({"segment_id": "bad"}, tmp_path, tmp_path / "out"))
+    sid, rows, err, _ = _work(({"segment_id": "bad"}, tmp_path, tmp_path / "out"))
     assert sid == "bad" and rows == [] and "KeyError" in err
 
 
@@ -114,7 +118,7 @@ def test_work_streams_tracks_and_deletes_them(tmp_path, monkeypatch):
     src.mkdir(), raw.mkdir()
     seg = make_segment(src, conversation_id=find_conv("train"))
     fake_hub(monkeypatch, src)
-    sid, rows, err = _work((seg, raw, tmp_path / "out", fake_vad, 10.0))
+    sid, rows, err, _ = _work((seg, raw, tmp_path / "out", fake_vad, 10.0))
     assert err is None and len(rows) == 1 and Path(rows[0]["audio_filepath"]).exists()
     assert list(raw.iterdir()) == []  # the 48 kHz tracks are gone once the segment is done
 
@@ -125,7 +129,7 @@ def test_non_48k_track_fails_segment_and_deletes_tracks(tmp_path, monkeypatch):
     seg = make_segment(src, conversation_id=find_conv("train"))
     sf.write(src / seg["tracks"]["a"], np.zeros(DUR * 16000, dtype=np.float32), 16000)
     fake_hub(monkeypatch, src)
-    sid, rows, err = _work((seg, raw, tmp_path / "out", fake_vad, 10.0))
+    sid, rows, err, _ = _work((seg, raw, tmp_path / "out", fake_vad, 10.0))
     assert sid == "s1" and rows == [] and "expected 48000 Hz" in err
     assert list(raw.iterdir()) == []
 
@@ -142,3 +146,28 @@ def test_speech_off_call_is_not_labelled(tmp_path):
     seg = make_segment(tmp_path, conversation_id=find_conv("train"))
     seg["speakers"][1]["on_call"] = [{"start": 0, "end": 7}]  # b: 2.5 s left in window 0-10, under the 5 s minimum
     assert process_segment(seg, tmp_path, tmp_path / "out", vad_fn=fake_vad, win=10.0) == []
+
+
+def test_progress_line_reports_share_of_audio_and_eta():
+    line = progress_line(10, 100, 2.0, 8.0, 50, 1, 600.0)
+    assert line == "10/100 segments, 25% of the audio · 50 mixes · 1 failed · 10m elapsed · ETA 30m"
+    assert "ETA" not in progress_line(100, 100, 8.0, 8.0, 50, 0, 600.0)
+
+
+def _ok(args):  # module-level: spawned workers import this module to find it
+    return args[0]["segment_id"], [{"kind": "pair"}], None, 0.0
+
+
+def _die(args):
+    os._exit(1)  # what the out-of-memory killer looks like to the pool
+
+
+SEGS = [{"segment_id": f"s{i}", "duration": 60.0, "tracks": {"a": "x"}} for i in range(3)]
+
+
+def test_run_collects_rows_and_a_dead_worker_raises_instead_of_hanging(tmp_path, capsys):
+    rows, failed = _run(SEGS, tmp_path, tmp_path, 2, GChat(None), "t", work=_ok)
+    assert len(rows) == 3 and failed == 0
+    assert "3/3 segments, 100% of the audio" in capsys.readouterr().out
+    with pytest.raises(BrokenProcessPool):
+        _run(SEGS, tmp_path, tmp_path, 2, GChat(None), "t", work=_die)

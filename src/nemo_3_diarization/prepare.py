@@ -3,8 +3,12 @@ import argparse
 import json
 import multiprocessing as mp
 import shutil
+import sys
 import tempfile
+import time
 from collections import Counter
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 
 import soundfile as sf
@@ -12,6 +16,7 @@ import torch
 from huggingface_hub import hf_hub_download, snapshot_download
 
 from nemo_3_diarization.audio import mix, phone_channel, vad
+from nemo_3_diarization.notify import GChat, duration
 from nemo_3_diarization.labels import (
     Intervals, intersect, merge, rttm_lines, split_of, top_speakers, windows,
 )
@@ -19,6 +24,8 @@ from nemo_3_diarization.labels import (
 SR = 48000
 BLOCK = 600 * SR  # VAD block, samples at 48 kHz; bounds memory on hour-long tracks
 REPO = "basis-ai/basis-conversations-1500"
+HEARTBEAT = 300  # s without a finished segment before a "still working" line: the biggest take ~30 min alone
+REPORT_EVERY = 0.1  # a Chat progress message per 10 % of the audio
 
 
 def _vad_track(path: Path, vad_fn) -> Intervals:
@@ -73,7 +80,10 @@ def process_segment(seg: dict, root: Path, out: Path, vad_fn=vad, win: float = 1
 
 
 def _init():
+    from huggingface_hub.utils import disable_progress_bars
+
     torch.set_num_threads(1)
+    disable_progress_bars()  # one bar per file from every worker buries the progress lines
 
 
 def _stream_segment(seg: dict, raw: Path, out: Path, vad_fn=vad, win: float = 105.0) -> list[dict]:
@@ -85,10 +95,61 @@ def _stream_segment(seg: dict, raw: Path, out: Path, vad_fn=vad, win: float = 10
 
 
 def _work(args):
+    t0 = time.monotonic()
     try:
-        return args[0]["segment_id"], _stream_segment(*args), None
+        return args[0]["segment_id"], _stream_segment(*args), None, time.monotonic() - t0
     except Exception as e:  # one bad segment must not lose the rest of the run
-        return args[0]["segment_id"], [], repr(e)  # repr keeps it on one line
+        return args[0]["segment_id"], [], repr(e), time.monotonic() - t0  # repr keeps it on one line
+
+
+def progress_line(done: int, total: int, done_h: float, total_h: float, mixes: int, failed: int,
+                  elapsed: float) -> str:
+    # progress by audio hours (duration x tracks), not segments: segments range from minutes to 76 h of tracks
+    eta = f" · ETA {duration(elapsed * (total_h - done_h) / done_h)}" if 0 < done_h < total_h else ""
+    return (f"{done}/{total} segments, {done_h / total_h:.0%} of the audio · {mixes:,} mixes · {failed} failed · "
+            f"{duration(elapsed)} elapsed{eta}")
+
+
+def _run(segs: list[dict], raw: Path, out: Path, workers: int, chat: GChat, name: str, work=_work):
+    hours = {s["segment_id"]: s["duration"] * len(s["tracks"]) / 3600 for s in segs}
+    total_h = sum(hours.values())
+    start = f"*{name}* started: {len(segs)} segments, {total_h:,.0f} h of speaker tracks, {workers} workers"
+    print(start.replace("*", ""), flush=True)
+    chat.send(start)
+    rows: list[dict] = []
+    failed, done_h, t0 = 0, 0.0, time.monotonic()
+    last, next_report = t0, REPORT_EVERY
+    ex = ProcessPoolExecutor(workers, mp_context=mp.get_context("spawn"), initializer=_init)
+    try:
+        pending = {ex.submit(work, (s, raw, out)): s["segment_id"] for s in segs}
+        while pending:
+            finished, _ = wait(pending, timeout=HEARTBEAT, return_when=FIRST_COMPLETED)
+            now = time.monotonic()
+            if not finished:
+                running = [sid for f, sid in pending.items() if f.running()]
+                print(f"still working: {len(pending)} segments left, last one finished {duration(now - last)} ago; "
+                      f"running: {', '.join(running)}", flush=True)
+                continue
+            for f in finished:
+                sid = pending.pop(f)
+                _, r, err, secs = f.result()  # a worker that died (e.g. killed for memory) raises BrokenProcessPool
+                rows += r
+                done_h += hours[sid]
+                last = now
+                if err:
+                    failed += 1
+                    print(f"FAILED {sid}: {err}", flush=True)
+                    if failed == 1:
+                        chat.send(f"⚠️ *{name}* first failed segment {sid}: {err[:500]}")
+                line = progress_line(len(segs) - len(pending), len(segs), done_h, total_h, len(rows), failed,
+                                     now - t0)
+                print(f"done {sid}: {len(r)} mixes in {duration(secs)} · {line}", flush=True)
+                if pending and done_h / total_h >= next_report:
+                    chat.send(f"*{name}* {line}")
+                    next_report = (int(done_h / total_h / REPORT_EVERY) + 1) * REPORT_EVERY
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
+    return rows, failed
 
 
 def main():
@@ -117,22 +178,28 @@ def main():
     for d in raw.glob("seg-*"):  # tracks left behind by a killed run
         shutil.rmtree(d)
 
-    rows: list[dict] = []
-    failed = 0
-    with mp.get_context("spawn").Pool(a.workers, initializer=_init) as pool:
-        for sid, r, err in pool.imap_unordered(_work, [(s, raw, out) for s in segs]):
-            rows += r
-            if err:
-                failed += 1
-                print(f"FAILED {sid}: {err}")
+    run_name = f"prepare-{out.name}-{time.strftime('%Y%m%d-%H%M')}"
+    chat = GChat.from_env(thread=run_name)
+    t0 = time.monotonic()
+    try:
+        rows, failed = _run(segs, raw, out, a.workers, chat, run_name)
+    except BaseException as e:
+        hint = (" A worker died, most likely killed for memory: rerun with fewer --workers."
+                if isinstance(e, BrokenProcessPool) else "")
+        print(f"prepare stopped: {type(e).__name__}.{hint}", file=sys.stderr, flush=True)
+        chat.send(f"🔴 *{run_name}* stopped after {duration(time.monotonic() - t0)}: {type(e).__name__}.{hint}")
+        raise
     out.mkdir(parents=True, exist_ok=True)
     for name, pick in [(sp, lambda r, sp=sp: r["split"] == sp and r["kind"] == "pair") for sp in ("train", "val", "test")] + [
         ("test_all", lambda r: r["kind"] == "all")
     ]:
         (out / f"{name}.json").write_text("".join(json.dumps(r) + "\n" for r in rows if pick(r)))
-    for (split, kind), n in sorted(Counter((r["split"], r["kind"]) for r in rows).items()):
+    counts = sorted(Counter((r["split"], r["kind"]) for r in rows).items())
+    for (split, kind), n in counts:
         print(f"{split:5s} {kind:4s} {n}")
     print(f"failed segments: {failed}")
+    chat.send(f"✅ *{run_name}* finished in {duration(time.monotonic() - t0)}: "
+              + ", ".join(f"{split} {kind} {n:,}" for (split, kind), n in counts) + f"; {failed} failed segments")
 
 
 if __name__ == "__main__":
