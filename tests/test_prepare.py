@@ -1,3 +1,6 @@
+import shutil
+from pathlib import Path
+
 import numpy as np
 import soundfile as sf
 from conftest import fake_vad
@@ -66,7 +69,7 @@ def test_no_all_row_without_pair_row(tmp_path):
 
 
 def test_window_at_nonzero_start_aligns_audio_and_rttm(tmp_path):
-    bursts = {"a": [(10.5, 14), (15, 19)], "b": [(11, 13), (14.5, 19.5)], "c": []}  # c: no rows, VAD skipped
+    bursts = {"a": [(10.5, 14), (15, 19)], "b": [(11, 13), (14.5, 19.5)], "c": []}  # c: silent track
     seg = make_segment(tmp_path, find_conv("train"), bursts=bursts, muted=False)
     (r,) = process_segment(seg, tmp_path, tmp_path / "out", vad_fn=fake_vad, win=10.0)
     assert r["audio_filepath"].endswith("s1_10.wav")  # second window: start=10
@@ -98,8 +101,44 @@ def test_work_reports_failure_instead_of_raising(tmp_path):
     assert sid == "bad" and rows == [] and "KeyError" in err
 
 
-def test_non_48k_track_fails_segment(tmp_path):
-    seg = make_segment(tmp_path, conversation_id=find_conv("train"))
-    sf.write(tmp_path / seg["tracks"]["a"], np.zeros(DUR * 16000, dtype=np.float32), 16000)
-    sid, rows, err = _work((seg, tmp_path, tmp_path / "out", fake_vad, 10.0))
+def fake_hub(monkeypatch, src):
+    def download(repo_id, filename, *, repo_type, local_dir):
+        dst = Path(local_dir) / filename
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        return str(shutil.copy(src / filename, dst))
+    monkeypatch.setattr(prepare, "hf_hub_download", download)
+
+
+def test_work_streams_tracks_and_deletes_them(tmp_path, monkeypatch):
+    src, raw = tmp_path / "hub", tmp_path / "raw"
+    src.mkdir(), raw.mkdir()
+    seg = make_segment(src, conversation_id=find_conv("train"))
+    fake_hub(monkeypatch, src)
+    sid, rows, err = _work((seg, raw, tmp_path / "out", fake_vad, 10.0))
+    assert err is None and len(rows) == 1 and Path(rows[0]["audio_filepath"]).exists()
+    assert list(raw.iterdir()) == []  # the 48 kHz tracks are gone once the segment is done
+
+
+def test_non_48k_track_fails_segment_and_deletes_tracks(tmp_path, monkeypatch):
+    src, raw = tmp_path / "hub", tmp_path / "raw"
+    src.mkdir(), raw.mkdir()
+    seg = make_segment(src, conversation_id=find_conv("train"))
+    sf.write(src / seg["tracks"]["a"], np.zeros(DUR * 16000, dtype=np.float32), 16000)
+    fake_hub(monkeypatch, src)
+    sid, rows, err = _work((seg, raw, tmp_path / "out", fake_vad, 10.0))
     assert sid == "s1" and rows == [] and "expected 48000 Hz" in err
+    assert list(raw.iterdir()) == []
+
+
+def test_untranscribed_speech_is_labelled(tmp_path):
+    # Basis ASR leaves out short replies ("haan", "hmm"); speech on the speaker's own track is speech regardless
+    seg = make_segment(tmp_path, conversation_id=find_conv("train"))
+    seg["transcript"] = [t for t in seg["transcript"] if t["speaker"] != "b"]
+    (r,) = process_segment(seg, tmp_path, tmp_path / "out", vad_fn=fake_vad, win=10.0)
+    assert read_rttm(r["rttm_filepath"])["b"] == [(4.5, 10.0)]
+
+
+def test_speech_off_call_is_not_labelled(tmp_path):
+    seg = make_segment(tmp_path, conversation_id=find_conv("train"))
+    seg["speakers"][1]["on_call"] = [{"start": 0, "end": 7}]  # b: 2.5 s left in window 0-10, under the 5 s minimum
+    assert process_segment(seg, tmp_path, tmp_path / "out", vad_fn=fake_vad, win=10.0) == []

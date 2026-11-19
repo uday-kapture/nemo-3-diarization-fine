@@ -33,11 +33,6 @@ def total(iv: Intervals, start: float, end: float) -> float:
     return sum(e - s for s, e in intersect(iv, [(start, end)]))
 
 
-def speaker_activity(vad: Intervals, rows: Intervals, on_call: Intervals, pad: float = 0.3) -> Intervals:
-    """Speech = VAD within the padded transcript rows, restricted to time on the call."""
-    return intersect(intersect(vad, merge(rows, pad)), on_call)
-
-
 def windows(duration: float, muted: Intervals, win: float = 105.0) -> Intervals:
     """Consecutive full windows (tail dropped) that have no positive-length overlap with a muted span."""
     ws = [(i * win, (i + 1) * win) for i in range(int(duration // win))]

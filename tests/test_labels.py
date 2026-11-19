@@ -7,9 +7,6 @@ def test_merge_pads_and_joins():
 def test_intersect():
     assert intersect([(0, 5), (8, 10)], [(4, 9)]) == [(4, 5), (8, 9)]
 
-def test_speaker_activity_requires_all_three():
-    assert speaker_activity(vad=[(0, 10)], rows=[(2, 3)], on_call=[(0, 2.5)], pad=0.3) == [(1.7, 2.5)]
-
 def test_windows_drop_muted():
     assert windows(230.0, muted=[], win=105.0) == [(0.0, 105.0), (105.0, 210.0)]
     assert windows(230.0, muted=[(104.99, 105.0)], win=105.0) == [(105.0, 210.0)]

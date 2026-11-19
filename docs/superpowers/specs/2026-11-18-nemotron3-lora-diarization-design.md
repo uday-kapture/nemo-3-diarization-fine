@@ -79,15 +79,16 @@ The user picked A.
 
 ### 1. `prepare` — Basis → 8 kHz 2-speaker training sessions
 
-1. **Download.** Call `huggingface_hub.snapshot_download` with
-   `allow_patterns=["{hi,en}/segments.jsonl", "{hi,en}/audio/*/*"]`, one pattern per language.
-2. **Speaker activity per track.** Take the intersection of three things:
-   - Silero VAD on the track, resampled to 16 kHz;
-   - that speaker's transcript rows, each padded by ±0.3 s and merged;
-   - that speaker's `on_call` spans.
-
-   VAD gives tight speech boundaries. The transcript rows reject echo or bleed of other speakers, and noise.
-   The dataset mutes some spans for echo, so bleed exists.
+1. **Download.** Call `huggingface_hub.snapshot_download` for `{hi,en}/segments.jsonl`. Stream the audio: each
+   worker downloads one segment's tracks with `hf_hub_download` into a temporary folder, processes them, then
+   deletes them. The VM is short of disk, so the ~60 GB of raw audio is never stored at once. Training reads the
+   prepared 8 kHz mixes from local disk; NeMo's loader needs local files.
+2. **Speaker activity per track.** Silero VAD on the track (resampled to 16 kHz), intersected with that
+   speaker's `on_call` spans.
+   - Transcript rows are not used. The first design also required a transcript row (±0.3 s) to reject bleed.
+     On real data (2026-11-19, one 31-minute Hindi segment) that gate removed 219 s of the speakers' own
+     speech, mostly short replies the ASR left out, and only 32 s of bleed.
+   - Known cost: bleed, laughter or noise that VAD accepts is labelled as speech.
 3. **Windows.**
    - Cut each segment into consecutive 105 s windows.
    - Drop any window that touches a `muted_span`.
@@ -116,7 +117,7 @@ The user picked A.
      speaking.
    - Training on 2-speaker mixes only could teach the model to stop finding a third speaker. This set catches
      that.
-8. **Expected output.** About 11.7k windows and about 20 GB of 8 kHz WAV.
+8. **Expected output.** About 11.7k windows and about 21 GB of 8 kHz WAV.
 
 ### 2. `train` — LoRA on the NeMo model
 

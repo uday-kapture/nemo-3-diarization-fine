@@ -2,16 +2,18 @@
 import argparse
 import json
 import multiprocessing as mp
+import shutil
+import tempfile
 from collections import Counter
 from pathlib import Path
 
 import soundfile as sf
 import torch
-from huggingface_hub import snapshot_download
+from huggingface_hub import hf_hub_download, snapshot_download
 
 from nemo_3_diarization.audio import mix, phone_channel, vad
 from nemo_3_diarization.labels import (
-    Intervals, intersect, merge, rttm_lines, speaker_activity, split_of, top_speakers, windows,
+    Intervals, intersect, merge, rttm_lines, split_of, top_speakers, windows,
 )
 
 SR = 48000
@@ -35,16 +37,11 @@ def process_segment(seg: dict, root: Path, out: Path, vad_fn=vad, win: float = 1
     for p in paths.values():  # another rate would silently time-scale every label taken from this track
         if sf.info(p).samplerate != SR:
             raise ValueError(f"{p.name}: expected {SR} Hz")
-    rows: dict[str, Intervals] = {}
-    for t in seg["transcript"]:
-        rows.setdefault(t["speaker"], []).append((t["start"], t["end"]))
     on_call = {s["speaker"]: [(c["start"], c["end"]) for c in s["on_call"]] for s in seg["speakers"]}
     muted = [(m["start"], m["end"]) for m in seg["muted_spans"]]
-    # speakers with no transcript rows have no labelled speech, so skip their VAD
-    activity = {
-        spk: speaker_activity(_vad_track(paths[spk], vad_fn), rows[spk], on_call.get(spk, [(0.0, seg["duration"])]))
-        for spk in paths if spk in rows
-    }
+    # speech = VAD on the speaker's own track while on the call. Not gated by transcript rows: Basis ASR leaves out
+    # short replies, and on real data that gate dropped ~7x more own speech than bleed.
+    activity = {spk: intersect(_vad_track(p, vad_fn), on_call.get(spk, [(0.0, seg["duration"])])) for spk, p in paths.items()}
 
     (out / "wav").mkdir(parents=True, exist_ok=True)
     (out / "rttm").mkdir(parents=True, exist_ok=True)
@@ -79,9 +76,17 @@ def _init():
     torch.set_num_threads(1)
 
 
+def _stream_segment(seg: dict, raw: Path, out: Path, vad_fn=vad, win: float = 105.0) -> list[dict]:
+    # one segment's 48 kHz tracks live on disk only while it is processed, so the full ~60 GB never does
+    with tempfile.TemporaryDirectory(prefix="seg-", dir=raw) as tmp:
+        for p in seg["tracks"].values():
+            hf_hub_download(REPO, p, repo_type="dataset", local_dir=tmp)
+        return process_segment(seg, tmp, out, vad_fn, win)
+
+
 def _work(args):
     try:
-        return args[0]["segment_id"], process_segment(*args), None
+        return args[0]["segment_id"], _stream_segment(*args), None
     except Exception as e:  # one bad segment must not lose the rest of the run
         return args[0]["segment_id"], [], repr(e)  # repr keeps it on one line
 
@@ -103,14 +108,14 @@ def main():
         with open(raw / lang / "segments.jsonl") as f:
             for line in f:
                 s = json.loads(line)
-                s["transcript"] = [{k: t[k] for k in ("speaker", "start", "end")} for t in s["transcript"]]  # drop words
+                del s["transcript"]  # unused, and the bulk of each row
                 segs.append(s)
                 if a.limit_segments and len(segs) >= a.limit_segments:
                     break
         if a.limit_segments and len(segs) >= a.limit_segments:
             break
-    snapshot_download(repo_id=REPO, repo_type="dataset", local_dir=raw,
-                      allow_patterns=[p for s in segs for p in s["tracks"].values()])
+    for d in raw.glob("seg-*"):  # tracks left behind by a killed run
+        shutil.rmtree(d)
 
     rows: list[dict] = []
     failed = 0

@@ -24,7 +24,8 @@ You need:
 - Linux with one NVIDIA GPU (built for an H200);
 - an NVIDIA driver ≥ 580: the locked torch 2.15.0 is built for CUDA 13 (13.2 runtime); `nvidia-smi` shows the
   driver version;
-- about 150 GB of free disk;
+- about 60 GB of free disk: about 21 GB of prepared audio (step 1), up to 8 GB of raw audio while step 1 runs,
+  and the Python environment with CUDA;
 - outbound access to `github.com` and `huggingface.co`.
 
 ```bash
@@ -48,7 +49,7 @@ uv run python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_
 ```
 
 What good output looks like:
-- `pytest` ends with `36 passed`. A silero `FutureWarning` and pyannote `'uem' was approximated` warnings are
+- `pytest` ends with `38 passed`. A silero `FutureWarning` and pyannote `'uem' was approximated` warnings are
   normal.
 - The second command prints `True NVIDIA H200 ...`.
 
@@ -89,8 +90,8 @@ EOF
 ```
 
 It prints, per smoke mix, how much louder the audio is inside the RTTM speech than outside it. Every line should
-be ≥ 10 dB. Lower values mean the labels are shifted or scaled against the audio: stop and investigate before the
-full run. `nan` means the window has no non-speech; judge by the other lines.
+be ≥ 10 dB; after the label fix, real smoke windows scored 21–48 dB. Lower values mean the mix has loud sound the
+labels miss, or labels shifted against the audio: stop and investigate before the full run. `nan` means the window has no non-speech; judge by the other lines.
 
 Then the full run:
 
@@ -98,8 +99,10 @@ Then the full run:
 uv run diar-prepare --langs hi en --workers $(nproc)
 ```
 
-This downloads about 60 GB (356 h of audio) to `data/basis-raw/`. It writes about 20 GB of 8 kHz mono WAV plus
-RTTM labels to `data/basis/`, with these manifests:
+This streams the 60 GB of 48 kHz Basis audio (356 h) instead of storing it. Each worker downloads one segment's
+tracks into a temporary `data/basis-raw/seg-*` folder, makes that segment's mixes, then deletes the tracks. At most
+about 8 GB of raw audio is on disk at once with 16 workers, usually about 2 GB. The run writes about 21 GB of
+8 kHz mono WAV plus RTTM labels to `data/basis/`, with these manifests:
 
 | Manifest | Contents |
 |---|---|
@@ -119,7 +122,8 @@ failed segments: <k>
 - The spec estimated about 11.7k windows in total.
 - A segment that fails prints `FAILED <segment_id>: <error>` and is skipped; the run continues. A handful is
   fine. Many failures point to a real problem, such as a full disk or a broken download.
-- Re-running is safe: downloads are cached in `data/basis-raw/`, and outputs are overwritten.
+- Re-running is safe: outputs are overwritten. Nothing is cached, so a re-run downloads the audio again. A
+  re-run also deletes any `seg-*` folders that a killed run left behind.
 - The smoke may have no `val` or `test` lines. That is fine, because the smoke steps below use only
   `data/smoke/train.json`.
 
