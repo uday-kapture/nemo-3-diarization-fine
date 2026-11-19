@@ -34,8 +34,19 @@ def test_score_unsorted_overlapping_reference():
 
 def test_empty_manifest_exits_before_model_load(tmp_path, monkeypatch, capsys):
     (tmp_path / "empty.json").write_text("\n")
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", f"sqlite:///{tmp_path}/mlflow.db")
     monkeypatch.setattr(sys, "argv", ["x", "--models", "m", "--manifests", str(tmp_path / "empty.json"),
                                       "--out", str(tmp_path / "r.json")])
     with pytest.raises(SystemExit):
         main()
     assert "empty manifest(s)" in capsys.readouterr().err and not (tmp_path / "r.json").exists()
+
+
+def test_missing_mlflow_uri_exits_before_model_load(tmp_path, monkeypatch, capsys):
+    (tmp_path / "m.json").write_text('{"audio_filepath": "a.wav"}\n')
+    monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
+    monkeypatch.setattr(sys, "argv", ["x", "--models", "m", "--manifests", str(tmp_path / "m.json"),
+                                      "--out", str(tmp_path / "r.json")])
+    with pytest.raises(SystemExit):
+        main()
+    assert "MLFLOW_TRACKING_URI is not set" in capsys.readouterr().err

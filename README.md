@@ -34,7 +34,7 @@ git clone <repo-url> nemo-3-diarization && cd nemo-3-diarization
 uv sync --extra train
 ```
 
-`--extra train` installs NeMo from the NVIDIA-NeMo/Speech GitHub repo, pinned to a commit. PyPI
+`--extra train` installs NeMo from the NVIDIA-NeMo/Speech GitHub repo, pinned to a commit, and MLflow. PyPI
 `nemo-toolkit` 3.0.0 cannot load this model's rope attention, which is why the VM needs GitHub access. uv
 installs Python 3.12 itself.
 
@@ -49,7 +49,7 @@ uv run python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_
 ```
 
 What good output looks like:
-- `pytest` ends with `38 passed`. A silero `FutureWarning` and pyannote `'uem' was approximated` warnings are
+- `pytest` ends with `47 passed`. A silero `FutureWarning` and pyannote `'uem' was approximated` warnings are
   normal.
 - The second command prints `True NVIDIA H200 ...`.
 
@@ -60,6 +60,17 @@ account that has been granted access; you can request access on the dataset page
 ```bash
 uv run hf auth login        # or: uvx --from huggingface_hub hf auth login
 ```
+
+**MLflow and Google Chat.** `diar-train` and `diar-evaluate` log to MLflow and refuse to start without
+`MLFLOW_TRACKING_URI`. Training can also post progress to a Google Chat space. Put the settings in `.env`, which is
+git-ignored:
+
+```bash
+cp .env.example .env && chmod 600 .env    # fill in MLflow (required) and, optionally, the Chat webhook
+source .env                               # in every new shell or tmux window
+```
+
+See [MLflow and Google Chat](#mlflow-and-google-chat) for what gets logged and posted.
 
 ## Steps
 
@@ -160,7 +171,8 @@ How it scores:
 - DER uses a ±0.25 s collar with overlapped speech included, the model card's CALLHOME protocol.
 - It runs on the GPU in fp32, one file at a time.
 
-It prints one row per model, latency and manifest, and writes the same rows as JSON to `--out`. The numbers are
+It prints one row per model, latency and manifest, and writes the same rows as JSON to `--out`. Each model also
+gets an MLflow run with metrics named `<latency>/<manifest>/<metric>`, for example `1.04s/basis/test.json/der`. The numbers are
 fractions: `0.0174` means 1.74 %. `spk acc` is the share of files where the model found the right number of
 speakers. Example from the one production call above:
 
@@ -188,7 +200,9 @@ What good smoke output looks like:
 - a `step <n> loss <x>` line per step;
 - `'val_loss' reached ...` after each validation;
 - `best checkpoint: ...`;
-- the two files in `out/smoke/`;
+- `out/smoke/` holding the two output files and `mlflow_run_id`;
+- a run named `smoke-<date>-<time>` in the MLflow experiment `Nemotron-diarization-fine-tune`, and, with a
+  webhook set, three Chat messages in its thread: started, the validation, finished;
 - the `restore_from` command exits without error.
 
 Keep `--max-steps` ≥ `--val-every`. With fewer steps no validation runs, so there is no best checkpoint: the script
@@ -216,6 +230,8 @@ Defaults:
 | `--alpha` | 32 |
 | `--accelerator` | `gpu` |
 | `--precision` | `bf16-mixed` |
+| `--name` | `<out-dir name>-<date>-<time>`: the MLflow run and Chat thread |
+| `--mlflow-experiment` | `Nemotron-diarization-fine-tune` |
 
 What the run does:
 - It freezes the base model and trains LoRA on every linear layer of the encoder.
@@ -229,7 +245,9 @@ Outputs:
   with `SortformerEncLabelModel.restore_from` exactly like stock. This is the file to ship.
 - `out/lora_adapter.pt`: the LoRA weights on their own, about 16 MB.
 - `out/ckpt/`: the best Lightning checkpoint.
-- `out/lightning_logs/`: the Lightning logs.
+- `out/mlflow_run_id`: the run's MLflow id. Step 5 uses it to nest the evaluation under this run.
+- In MLflow: the run's flags (`cli.*`), the model config as trained (`cfg/*`), and the losses and validation
+  metrics.
 
 ### 5. Evaluate stock vs fine-tuned
 
@@ -241,6 +259,7 @@ uv run diar-evaluate --models out/nemotron3-diar-lora-merged.nemo \
   --out out/finetuned.json
 ```
 
+In MLflow this evaluation is nested under the training run, because `out/mlflow_run_id` sits next to the `.nemo`.
 Then compare it with the step-3 baseline and apply the ship rule below:
 
 ```bash
@@ -271,6 +290,34 @@ above stops on such a partial file. A DER of `nan` means that manifest's referen
 Ship `out/nemotron3-diar-lora-merged.nemo` only if its DER at **1.04 s** is no worse than stock's on **every**
 manifest: Basis 2-speaker, Basis all-speaker, and production when present. Otherwise keep the stock model.
 
+## MLflow and Google Chat
+
+Both work as in the sibling `nemotron-3.5-asr` repo, with the same environment variables.
+
+**MLflow** (`tracking.py`).
+- `diar-train` and `diar-evaluate` refuse to run without `MLFLOW_TRACKING_URI`. Without it, runs would land in a
+  local store on the VM that nobody sees.
+- Auth is either `MLFLOW_TRACKING_USERNAME` and `MLFLOW_TRACKING_PASSWORD` (Basic) or `MLFLOW_TRACKING_TOKEN`
+  (Bearer). If both are set, only Basic is sent.
+- Training logs through Lightning's MLFlowLogger. The train loss is logged every 50 steps, validation metrics at
+  every validation.
+- Weights are never uploaded.
+
+**Google Chat** (`notify.py`).
+- In a Chat space, add an incoming webhook (Apps & integrations → Webhooks) and export its URL as
+  `GCHAT_WEBHOOK_URL`. Anyone holding the URL can post into the space, so keep it in `.env`, out of git. Without it
+  nothing is sent.
+- Each training run posts into its own thread, named after `--name`:
+  - start: steps, batch size, LoRA parameter count, GPU;
+  - every validation: `val_loss` against the best so far, train loss, ETA;
+  - a non-finite loss;
+  - an error, with the end of its traceback, or a Ctrl-C;
+  - the finish, with the best `val_loss` and the merged model's path.
+- A run killed outright (`kill -9`, the host's out-of-memory killer, a lost VM) sends nothing. Messages stopping is
+  the sign.
+- Messages carry metrics and step counts, never audio or labels. A failed post is printed to stderr and training
+  continues.
+
 ## Troubleshooting
 
 | Symptom | Fix |
@@ -279,4 +326,5 @@ manifest: Basis 2-speaker, Basis all-speaker, and production when present. Other
 | Gated-repo, 401 or 403 error from `diar-prepare` | The logged-in HF account has no Basis access. Request access, then run `uv run hf auth login` again. |
 | `ModuleNotFoundError: No module named 'nemo'` | Run `uv sync --extra train`. A plain `uv sync` removes NeMo. |
 | CUDA out of memory in `diar-train` | Lower `--batch-size`. |
+| `MLFLOW_TRACKING_URI is not set` | `source .env` in this shell; create it from `.env.example` first. |
 | `torch.cuda.is_available()` prints `False` | Run `nvidia-smi`. If it fails or shows a driver below 580, install driver ≥ 580 (the locked torch needs CUDA 13) and reboot. |

@@ -10,3 +10,8 @@ wheels/
 .venv
 data/
 out/
+mlruns/
+mlflow.db
+
+# secrets for the training box; .env.example is the template
+.env
