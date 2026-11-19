@@ -100,9 +100,10 @@ for line in open("data/smoke/train.json"):
 EOF
 ```
 
-It prints, per smoke mix, how much louder the audio is inside the RTTM speech than outside it. Every line should
-be ≥ 10 dB; after the label fix, real smoke windows scored 21–48 dB. Lower values mean the mix has loud sound the
-labels miss, or labels shifted against the audio: stop and investigate before the full run. `nan` means the window has no non-speech; judge by the other lines.
+It prints, per smoke mix, how much louder the audio is inside the RTTM speech than outside it. Nearly every line
+should be ≥ 10 dB. Measured on real data: the 32 smoke mixes scored 11.8 dB at the lowest (median 30.8 dB); on the
+full run, 9 of 300 sampled mixes scored 6–10 dB (median 25.3 dB). Many lines below 10 dB mean the mix has loud sound
+the labels miss, or labels shifted against the audio: stop and investigate before the full run. `nan` means the window has no non-speech; judge by the other lines.
 
 Then the full run:
 
